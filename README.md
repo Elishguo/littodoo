@@ -46,7 +46,7 @@ It is built for people who want a note that stays visible beside their work inst
 Requires macOS 12+ and Xcode Command Line Tools (`xcode-select --install`).
 
 ```bash
-git clone https://github.com/<your-username>/littodoo.git
+git clone https://github.com/Elishguo/littodoo.git
 cd littodoo
 ./scripts/build-mac.sh
 open build/Littodoo.app   # then drag it to /Applications
