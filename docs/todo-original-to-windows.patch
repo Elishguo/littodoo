@@ -1,0 +1,99 @@
+--- original/todo.py
++++ merged/todo.py
+@@ -6,6 +6,10 @@
+ import sys
+ import threading
+ from pathlib import Path
++
++IS_WINDOWS = os.name == "nt"
++if IS_WINDOWS:
++    import windows_integration
+ 
+ ROOT = Path(__file__).resolve().parent
+ UI = ROOT / "ui.html"
+@@ -34,11 +38,17 @@
+ INIT = load_state()
+ PLATFORM = "win" if os.name == "nt" else ("mac" if sys.platform == "darwin" else "linux")
+ BOOT = f"<script>window.__PLATFORM__={json.dumps(PLATFORM)};window.__INIT__={INIT};</script>"
++if IS_WINDOWS:
++    import base64
++    BOOT += "<style>" + (ROOT / "windows.css").read_text(encoding="utf-8") + "</style>"
++    BOOT += "<script>window.__WINDOWS_ICON__='data:image/png;base64," + base64.b64encode((ROOT / "icon.png").read_bytes()).decode("ascii") + "';</script>"
+ # inject boot before </head>
+ if "</head>" in HTML:
+     PAGE = HTML.replace("</head>", BOOT + "</head>", 1)
+ else:
+     PAGE = BOOT + HTML
++if IS_WINDOWS:
++    PAGE = PAGE.replace("</body>", "<script>" + (ROOT / "windows.js").read_text(encoding="utf-8") + "</script></body>", 1)
+ 
+ try:
+     import webview
+@@ -52,6 +62,7 @@
+     def __init__(self):
+         self._win = None
+         self._start = None
++        self._chrome = None
+ 
+     def msg(self, raw: str):
+         try:
+@@ -63,13 +74,22 @@
+         if t == "save":
+             save_state(b.get("json") or "")
+         elif t == "close":
+-            w.destroy()
++            if IS_WINDOWS and self._chrome:
++                self._chrome.Close()
++            else:
++                w.destroy()
+         elif t == "pin":
++            if IS_WINDOWS:
++                if self._chrome:
++                    self._chrome.SetPinned(bool(b.get("on")))
++                return
+             try:
+                 w.on_top = bool(b.get("on"))
+             except Exception:
+                 pass
+         elif t == "opacity":
++            if IS_WINDOWS:
++                return  # The Windows UI sends native opacity through appearance.
+             try:
+                 v = float(b.get("value", 1))
+                 w.transparent = True
+@@ -79,8 +99,13 @@
+             except Exception:
+                 pass
+         elif t == "drag":
++            if IS_WINDOWS and self._chrome:
++                self._chrome.Move()
+             # frameless drag handled by pywebview if easy_drag
+             pass
++        elif t == "appearance" and IS_WINDOWS:
++            if self._chrome:
++                self._chrome.SetAppearance(b.get("color", "#FAFAFA"), float(b.get("value", 1)))
+         elif t == "rs":
+             try:
+                 self._start = w.get_size()
+@@ -112,15 +137,18 @@
+     min_size=(200, 180),
+     js_api=api,
+ )
+-if ICON.exists():
+-    _kw["icon"] = str(ICON)
++if IS_WINDOWS:
++    _kw.update(easy_drag=False, text_select=True, resizable=True, min_size=(220, 180))
+ window = webview.create_window(**_kw)
+ api._win = window
+ 
+ def on_loaded():
++    if IS_WINDOWS:
++        window.events.shown.wait()
++        api._chrome = windows_integration.install(window, st)
+     try:
+         window.evaluate_js("window.__native && window.__native.applyOpacity && window.__native.applyOpacity()")
+     except Exception:
+         pass
+ 
+-webview.start(func=on_loaded, debug=False)
++webview.start(func=on_loaded, debug=False, icon=str(ICON) if ICON.exists() else None)

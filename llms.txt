@@ -1,0 +1,9 @@
+# Littodoo
+
+> Littodoo is a free, open-source (MIT) desktop sticky note for macOS and Windows that works as both a to-do list and a mind map. It is offline-first with no account or cloud.
+
+## Docs
+- [README](README.md): what it is, install steps, shortcuts, FAQ
+- [Shared interface](src/ui.html): the single-file UI used on both platforms
+- [macOS shell](mac/main.swift): Swift + WKWebView host
+- [Windows package](windows/): Python + pywebview host with native C# window layer
