@@ -10,7 +10,7 @@ let html = #"""
 <!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <style>
-:root{--bg:#FAFAFA;--ink:#222;--sub:rgba(0,0,0,.38);--line:rgba(0,0,0,.1);--time:#A8A8A8;--box:rgba(0,0,0,.35)}
+:root{--bg:#FAFAFA;--ink:#222;--sub:rgba(0,0,0,.38);--line:rgba(0,0,0,.1);--time:#A8A8A8;--box:rgba(0,0,0,.35);--sel:rgba(0,122,255,.22)}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;background:transparent;overflow:hidden;
  font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:var(--ink);cursor:default;-webkit-user-select:none;user-select:none}
@@ -29,6 +29,7 @@ html,body{margin:0;height:100%;background:transparent;overflow:hidden;
 .sw i.act{outline:2px solid var(--ink);outline-offset:1px}
 .list{flex:1;overflow-y:auto;padding:0 0 26px;margin:0;list-style:none}
 .list::-webkit-scrollbar{width:0}
+.list.allsel .tx{background:var(--sel);border-radius:3px}
 .it{position:relative;overflow:hidden;border-bottom:1px dashed var(--line);touch-action:pan-y}
 .it:last-child{border-bottom:none}
 .inner{display:flex;align-items:flex-start;gap:9px;padding:7px 14px;position:relative;z-index:1;
@@ -145,9 +146,37 @@ if(S.mode!=="map")S.mode="list";
 if(!S.map||typeof S.map!=="object")S.map={projects:[]};
 if(!Array.isArray(S.map.projects))S.map.projects=[];
 const post=m=>{try{window.webkit.messageHandlers.app.postMessage(m);}catch(e){try{window.pywebview.api.msg(JSON.stringify(m));}catch(e2){}}};
-const save=()=>post({type:"save",json:JSON.stringify(S)});
+const isMac=window.__PLATFORM__==="mac";
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
 let pending=null,openReveal=null,mapFocus=null,mapCascade=0;
+let structuring=false,allSel=false,saveQueued=false,lastJSON="";
+const skipCommit=new WeakSet();
+function fieldText(el){
+ return ((el&&el.textContent)||"").replace(/\u00a0/g," ").replace(/\u200b/g,"");
+}
+function serializeMac(){
+ const copy=JSON.parse(JSON.stringify(S));
+ copy.items=(copy.items||[]).map(it=>{
+  const text=(it.text||"").replace(/\u00a0/g," ").replace(/\u200b/g,"").replace(/\s+$/,"");
+  return Object.assign({},it,{text});
+ }).filter(it=>it.text.trim().length);
+ return JSON.stringify(copy);
+}
+function save(){
+ const json=isMac?(syncAllFromDOM(),serializeMac()):JSON.stringify(S);
+ lastJSON=json;
+ post({type:"save",json});
+}
+function scheduleSave(){
+ if(!isMac||saveQueued)return;
+ saveQueued=true;
+ queueMicrotask(()=>{saveQueued=false;if(isMac)save();});
+}
+function flush(){
+ saveQueued=false;
+ save();
+ return lastJSON;
+}
 
 function tsFromId(id){
  if(!id)return null;
@@ -176,6 +205,7 @@ function color(id){
  r.setProperty("--line",dark?"rgba(255,255,255,.14)":"rgba(0,0,0,.1)");
  r.setProperty("--time",dark?"rgba(255,255,255,.35)":"#A8A8A8");
  r.setProperty("--box",dark?"rgba(255,255,255,.35)":"rgba(0,0,0,.35)");
+ r.setProperty("--sel",dark?"rgba(255,255,255,.18)":"rgba(0,122,255,.22)");
  document.querySelectorAll(".sw i").forEach(e=>e.classList.toggle("act",e.dataset.id===c.id));
  if(S.mode==="map")requestAnimationFrame(drawMapLines);
 }
@@ -249,6 +279,175 @@ function caretInfo(tx){
  const r=sel.getRangeAt(0);const pre=document.createRange();pre.selectNodeContents(tx);pre.setEnd(r.startContainer,r.startOffset);
  const before=pre.toString();return {pos:before.length,line:(before.match(/\n/g)||[]).length};
 }
+function caretSplit(tx){
+ const sel=window.getSelection();
+ const full=fieldText(tx);
+ if(!sel||!sel.rangeCount) return {before:full,after:""};
+ const r=sel.getRangeAt(0);
+ if(!tx.contains(r.startContainer)||!tx.contains(r.endContainer)) return {before:full,after:""};
+ const pre=document.createRange();pre.selectNodeContents(tx);pre.setEnd(r.startContainer,r.startOffset);
+ const post=document.createRange();post.selectNodeContents(tx);post.setStart(r.endContainer,r.endOffset);
+ return {before:fieldText({textContent:pre.toString()}),after:fieldText({textContent:post.toString()})};
+}
+function focusCaret(tx,where){
+ if(!tx)return;
+ try{tx.focus({preventScroll:true});}catch(e){tx.focus();}
+ const sel=window.getSelection();if(!sel)return;
+ const r=document.createRange();
+ const tn=[...tx.childNodes].find(n=>n.nodeType===3);
+ if(where==="end"){
+  if(tn){r.setStart(tn,tn.textContent.length);r.collapse(true);}
+  else{r.selectNodeContents(tx);r.collapse(false);}
+ }else if(tn){r.setStart(tn,0);r.collapse(true);}
+ else{r.setStart(tx,0);r.collapse(true);}
+ sel.removeAllRanges();sel.addRange(r);
+ const li=tx.closest(".it");
+ const sc=document.getElementById("list");
+ if(li&&sc){
+  const er=li.getBoundingClientRect(),sr=sc.getBoundingClientRect();
+  if(er.bottom>sr.bottom+1||er.top<sr.top-1)li.scrollIntoView({block:"nearest"});
+ }
+}
+function showEmptyHint(){
+ const ul=document.getElementById("list");
+ if(!ul||ul.querySelector(".it")||ul.querySelector(".empty"))return;
+ const d=document.createElement("div");d.className="empty";d.textContent="Tap + to add";ul.appendChild(d);
+}
+function placeInModel(ni,visualIndex){
+ const vis=ordered().filter(x=>x.id!==ni.id);
+ const idx=Math.max(0,Math.min(visualIndex,vis.length));
+ vis.splice(idx,0,ni);
+ const undone=[],done=[];
+ vis.forEach(x=>{(x.done?done:undone).push(x);});
+ S.items=undone.concat(done);
+}
+function attachRow(ni){
+ const ul=document.getElementById("list");
+ const hint=ul.querySelector(".empty");if(hint)hint.remove();
+ const li=row(ni,false);
+ const vis=ordered();
+ const i=vis.findIndex(x=>x.id===ni.id);
+ const next=i>=0?vis[i+1]:null;
+ if(next){
+  const ref=[...ul.children].find(n=>n.dataset&&n.dataset.id===next.id);
+  if(ref)ul.insertBefore(li,ref);else ul.appendChild(li);
+ }else ul.appendChild(li);
+ return li;
+}
+function macRemoveItem(li,it,opt){
+ if(!li)return;
+ const tx=li.querySelector(".tx");
+ if(tx)skipCommit.add(tx);
+ const prev=li.previousElementSibling;
+ const prevIt=prev&&prev.classList&&prev.classList.contains("it")?prev:null;
+ structuring=true;
+ S.items=S.items.filter(x=>x.id!==it.id);
+ if(pending&&pending.id===it.id)pending=null;
+ li.remove();
+ if(!document.querySelector("#list .it"))showEmptyHint();
+ if(opt&&opt.focusPrev&&prevIt)focusCaret(prevIt.querySelector(".tx"),"end");
+ structuring=false;
+ save();
+}
+function macEnter(tx){
+ const li=tx&&tx.closest&&tx.closest(".it");if(!li)return;
+ const it=S.items.find(x=>x.id===li.dataset.id);if(!it)return;
+ const parts=caretSplit(tx);
+ const before=parts.before.replace(/\s+$/,"");
+ const after=parts.after.replace(/\s+$/,"");
+ if(!before&&!after)return;
+ structuring=true;
+ try{
+  const idx=ordered().findIndex(x=>x.id===it.id);
+  const at=idx<0?ordered().length:idx;
+  if(parts.before.length===0&&after){
+   const ni={id:uid(),text:"",done:false,createdAt:Date.now()};
+   placeInModel(ni,at);
+   focusCaret(attachRow(ni).querySelector(".tx"),"start");
+  }else if(!after){
+   it.text=before;
+   if(fieldText(tx).replace(/\s+$/,"")!==before)tx.textContent=before;
+   const ni={id:uid(),text:"",done:false,createdAt:Date.now()};
+   placeInModel(ni,at+1);
+   focusCaret(attachRow(ni).querySelector(".tx"),"start");
+  }else{
+   it.text=before;
+   tx.textContent=before;
+   const ni={id:uid(),text:after,done:!!it.done,createdAt:Date.now()};
+   placeInModel(ni,at+1);
+   focusCaret(attachRow(ni).querySelector(".tx"),"start");
+  }
+ }finally{structuring=false;}
+ save();
+}
+function macAdd(){
+ const tx=document.activeElement;
+ if(tx&&tx.classList&&tx.classList.contains("tx")&&tx.closest("#list .it")){macEnter(tx);return;}
+ const ni={id:uid(),text:"",done:false,createdAt:Date.now()};
+ const vis=ordered();
+ const firstDone=vis.findIndex(x=>x.done);
+ placeInModel(ni,firstDone<0?vis.length:firstDone);
+ focusCaret(attachRow(ni).querySelector(".tx"),"start");
+ save();
+}
+function syncAllFromDOM(){
+ if(!isMac)return;
+ if(S.mode==="map"){
+  document.querySelectorAll(".mp").forEach(mp=>{
+   const p=findProject(mp.dataset.id);if(!p)return;
+   const title=mp.querySelector(".mp-title");
+   if(title)p.title=fieldText(title).replace(/\s+$/,"");
+  });
+  document.querySelectorAll(".mk").forEach(mk=>{
+   const loc=locate(mk.dataset.id);if(!loc)return;
+   const tx=mk.querySelector(".tx");if(!tx)return;
+   loc.node.text=fieldText(tx).replace(/\s+$/,"");
+  });
+  return;
+ }
+ document.querySelectorAll("#list .it").forEach(li=>{
+  const tx=li.querySelector(".tx");if(!tx)return;
+  const v=fieldText(tx).replace(/\s+$/,"");
+  if(pending&&pending.id===li.dataset.id){pending.text=v;return;}
+  const it=S.items.find(x=>x.id===li.dataset.id);
+  if(it)it.text=v;
+ });
+ if(pending&&(pending.text||"").trim()){
+  const it={id:pending.id,text:pending.text.replace(/\s+$/,""),done:!!pending.done,createdAt:pending.createdAt||Date.now()};
+  const after=pending._after;pending=null;
+  const vis=ordered();let idx=vis.length;
+  if(after){const i=vis.findIndex(x=>x.id===after);if(i>=0)idx=i+1;}
+  placeInModel(it,idx);
+ }
+}
+function todosPlainText(){
+ syncAllFromDOM();
+ return ordered().map(it=>(it.text||"").replace(/\u00a0/g," ").replace(/\u200b/g,"").replace(/[ \t]*\n[ \t]*/g," ").trim()).filter(Boolean).join("\n");
+}
+function clearAllSel(){
+ allSel=false;
+ const list=document.getElementById("list");
+ if(list)list.classList.remove("allsel");
+}
+function selectAllTodos(){
+ if(S.mode!=="list"){
+  const el=document.activeElement;
+  if(el&&el.isContentEditable){
+   const r=document.createRange();r.selectNodeContents(el);
+   const s=window.getSelection();if(!s)return;s.removeAllRanges();s.addRange(r);
+  }
+  return;
+ }
+ allSel=true;
+ const list=document.getElementById("list");
+ if(list)list.classList.add("allsel");
+}
+function copySelection(){
+ if(S.mode==="list"&&allSel)return todosPlainText();
+ const sel=window.getSelection();
+ if(sel&&!sel.isCollapsed)return sel.toString().replace(/\u200b/g,"");
+ return null;
+}
 function addAtCaret(){
  const tx=document.activeElement&&document.activeElement.classList&&document.activeElement.classList.contains("tx")?document.activeElement:null;
  if(!tx){if(!pending)pending={id:uid(),text:"",done:false,createdAt:Date.now()};render();return;}
@@ -285,8 +484,14 @@ function row(it,isNew){
  const tx=document.createElement("div");tx.className="tx";tx.contentEditable="true";tx.spellcheck=false;tx.textContent=it.text||"";
  let finished=false;
  const commit=(again)=>{
+  if(skipCommit.has(tx)||structuring)return;
+  if(isMac&&!isNew){
+   const v=fieldText(tx).replace(/\s+$/,"");
+   if(!v.trim()){if(finished)return;finished=true;macRemoveItem(li,it);return;}
+   it.text=v;save();return;
+  }
   if(finished)return;finished=true;
-  const v=tx.textContent.replace(/\u00a0/g," ").replace(/\s+$/,"");
+  const v=fieldText(tx).replace(/\s+$/,"");
   if(isNew){
    pending=null;
    if(v.trim()){it.text=v;it.createdAt=it.createdAt||Date.now();delete it._after;S.items.push(it);save();}
@@ -298,12 +503,23 @@ function row(it,isNew){
   }
  };
  tx.onkeydown=e=>{
+  tx._se=!!e.shiftKey;
+  if(isMac&&e.key==="Enter"&&!e.isComposing&&!e.shiftKey){
+   e.preventDefault();
+   macEnter(tx);return;
+  }
   if(e.key==="Enter"&&!e.isComposing){
    e.preventDefault();
-   if(!tx.textContent.trim())return;
-   insertAtCaret("\n");return;
+   if(!fieldText(tx).trim())return;
+   insertAtCaret("\n");
+   if(isMac&&!isNew){it.text=fieldText(tx);scheduleSave();}
+   return;
   }
   if(e.key==="Escape"){e.preventDefault();if(isNew){finished=true;pending=null;render();}else tx.blur();return;}
+  if(isMac&&!isNew&&(e.key==="Backspace"||e.key==="Delete")&&!e.isComposing&&!fieldText(tx).trim()){
+   e.preventDefault();
+   macRemoveItem(li,it,{focusPrev:true});return;
+  }
   if((e.key==="Backspace"||e.key==="Delete")&&!e.isComposing&&isCaretAtStart(tx)){
    if(isNew){
     e.preventDefault();finished=true;pending=null;
@@ -330,9 +546,20 @@ function row(it,isNew){
    }
   }
  };
- tx.addEventListener("paste",e=>{e.preventDefault();const t=(e.clipboardData||window.clipboardData).getData("text/plain");if(t)insertAtCaret(t.replace(/\r\n?/g,"\n"));});
- tx.onblur=()=>commit(false);
+ tx.addEventListener("beforeinput",e=>{
+  if(!isMac||e.isComposing)return;
+  if((e.inputType==="insertParagraph"||e.inputType==="insertLineBreak")&&!tx._se)e.preventDefault();
+ });
+ tx.addEventListener("paste",e=>{
+  e.preventDefault();
+  const t=(e.clipboardData||window.clipboardData).getData("text/plain");
+  if(!t)return;
+  insertAtCaret(t.replace(/\r\n?/g,"\n"));
+  if(isMac&&!isNew){it.text=fieldText(tx);scheduleSave();}
+ });
+ tx.onblur=()=>{if(skipCommit.has(tx)||structuring)return;commit(false);};
  tx.addEventListener("pointerdown",e=>e.stopPropagation());
+ if(isMac&&!isNew)tx.addEventListener("input",()=>{it.text=fieldText(tx);scheduleSave();});
 
  let sx=0,sy=0,tracking=false,axis=null,base=0;
  const onDown=e=>{
@@ -777,10 +1004,14 @@ document.getElementById("bColor").onclick=()=>sw.classList.toggle("show");
 document.getElementById("bAdd").onmousedown=e=>e.preventDefault();
 document.getElementById("bAdd").onclick=()=>{
  if(S.mode==="map")mapOnAdd();
+ else if(isMac)macAdd();
  else addAtCaret();
 };
 document.getElementById("bMap").onclick=()=>setMode(S.mode==="map"?"list":"map");
-document.getElementById("bClose").onclick=()=>post({type:"close"});
+document.getElementById("bClose").onclick=()=>{
+ if(isMac)post({type:"close",json:flush()});
+ else post({type:"close"});
+};
 const bPin=document.getElementById("bPin");
 function setPin(on){S.pin=!!on;bPin.classList.toggle("on",S.pin);post({type:"pin",on:S.pin});save();}
 bPin.onclick=()=>setPin(!S.pin);
@@ -797,9 +1028,23 @@ window.__native={
  applyOpacity:()=>{document.getElementById("note").style.opacity=S.opacity;post({type:"opacity",value:S.opacity});},
  opacityDelta:(d)=>{S.opacity=Math.min(1,Math.max(0.25,+(S.opacity+d).toFixed(2)));window.__native.applyOpacity();save();},
  setOpacity:(v)=>{S.opacity=Math.min(1,Math.max(0.25,+v));window.__native.applyOpacity();save();},
- add:()=>{if(S.mode==="map")mapOnAdd();else addAtCaret();}
+ add:()=>{if(S.mode==="map")mapOnAdd();else if(isMac)macAdd();else addAtCaret();},
+ flush:()=>flush(),
+ selectAllTodos:()=>selectAllTodos(),
+ copySelection:()=>copySelection(),
+ copyAll:()=>todosPlainText()
 };
 window.addEventListener("keydown",e=>{
+ if(allSel&&!e.metaKey&&!e.ctrlKey&&!e.altKey&&e.key!=="Shift")clearAllSel();
+ const metaOnly=e.metaKey&&!e.ctrlKey&&!e.altKey&&!e.shiftKey;
+ if(isMac&&metaOnly&&(e.key==="a"||e.key==="A")&&S.mode==="list"){
+  e.preventDefault();selectAllTodos();return;
+ }
+ if(isMac&&metaOnly&&(e.key==="c"||e.key==="C")&&S.mode==="list"&&allSel){
+  e.preventDefault();
+  post({type:"copy",text:todosPlainText()});
+  return;
+ }
  const mod=isWin?e.altKey:e.metaKey;
  if(!mod)return;
  if(e.key==="f"||e.key==="F"){e.preventDefault();setPin(!S.pin);}
@@ -807,6 +1052,14 @@ window.addEventListener("keydown",e=>{
  if(e.key==="-"){e.preventDefault();window.__native.opacityDelta(-0.08);}
  if(e.key==="n"||e.key==="N"){e.preventDefault();window.__native.add();}
 });
+document.addEventListener("copy",e=>{
+ if(!isMac||!allSel||S.mode!=="list")return;
+ e.preventDefault();
+ const text=todosPlainText();
+ e.clipboardData.setData("text/plain",text);
+ post({type:"copy",text});
+});
+document.addEventListener("pointerdown",()=>{if(allSel)clearAllSel();},true);
 let swipeX=0,swipeTimer=null;
 const MAXS=92;
 function applySwipe(x,animate){
@@ -853,8 +1106,40 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler {
     var window: StickyWindow!
     var web: WKWebView!
     var startFrame = NSRect.zero
+    var isTerminating = false
+    var didReplyToTerminate = false
     let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("ToDoTie")
     var stateURL: URL { dir.appendingPathComponent("state.json") }
+
+    func writeState(_ json: String) {
+        guard let data = json.data(using: .utf8), !data.isEmpty else { return }
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              obj["items"] is [Any] else { return }
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try data.write(to: stateURL, options: .atomic)
+            if let handle = try? FileHandle(forWritingTo: stateURL) {
+                try? handle.synchronize()
+                try? handle.close()
+            }
+        } catch {
+            NSLog("Littodoo save failed: \(error.localizedDescription)")
+        }
+    }
+
+    func flushFromWeb(_ completion: (() -> Void)? = nil) {
+        guard let web = web else { completion?(); return }
+        web.evaluateJavaScript("window.__native&&window.__native.flush?window.__native.flush():null") { result, _ in
+            if let json = result as? String { self.writeState(json) }
+            completion?()
+        }
+    }
+
+    func setPasteboard(_ text: String) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+    }
 
     func applicationDidFinishLaunching(_ n: Notification) {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -904,6 +1189,34 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler {
             self.adjustOpacity(by: Double(ev.scrollingDeltaY) * 0.01)
             return nil
         }
+        // Cmd+A is delivered to the web view as selectAll: before the page sees it.
+        // Swallow it so Select All covers every to-do, not only the focused line.
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] ev in
+            guard let self = self else { return ev }
+            let mods = ev.modifierFlags.intersection([.command, .shift, .option, .control])
+            guard mods == .command,
+                  ev.charactersIgnoringModifiers?.lowercased() == "a" else { return ev }
+            self.selectAllItems(nil)
+            return nil
+        }
+    }
+
+    func applicationWillResignActive(_ notification: Notification) {
+        flushFromWeb(nil)
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if isTerminating { return .terminateNow }
+        isTerminating = true
+        didReplyToTerminate = false
+        let finish = { [weak self] in
+            guard let self = self, !self.didReplyToTerminate else { return }
+            self.didReplyToTerminate = true
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: finish)
+        flushFromWeb(finish)
+        return .terminateLater
     }
 
     @objc func togglePin(_ sender: Any?) {
@@ -913,6 +1226,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler {
     @objc func opacityDown(_ sender: Any?) { adjustOpacity(by: -0.08) }
     @objc func addItem(_ sender: Any?) {
         web.evaluateJavaScript("window.__native && window.__native.add()", completionHandler: nil)
+    }
+    @objc func selectAllItems(_ sender: Any?) {
+        web?.evaluateJavaScript("window.__native&&window.__native.selectAllTodos&&window.__native.selectAllTodos()", completionHandler: nil)
+    }
+    @objc func copySelection(_ sender: Any?) {
+        web?.evaluateJavaScript("window.__native&&window.__native.copySelection&&window.__native.copySelection()") { result, _ in
+            if let text = result as? String { self.setPasteboard(text) }
+        }
+    }
+    @objc func copyAllItems(_ sender: Any?) {
+        web?.evaluateJavaScript("window.__native&&window.__native.copyAll&&window.__native.copyAll()") { result, _ in
+            if let text = result as? String { self.setPasteboard(text) }
+        }
     }
 
     func adjustOpacity(by d: Double) {
@@ -925,7 +1251,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler {
         guard let b = m.body as? [String: Any], let t = b["type"] as? String else { return }
         switch t {
         case "save":
-            if let j = b["json"] as? String { try? j.write(to: stateURL, atomically: true, encoding: .utf8) }
+            if let j = b["json"] as? String { writeState(j) }
+        case "copy":
+            if let text = b["text"] as? String { setPasteboard(text) }
         case "drag":
             if let e = NSApp.currentEvent { window.performDrag(with: e) }
         case "rs":
@@ -942,6 +1270,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler {
         case "opacity":
             if let v = b["value"] as? Double { window.alphaValue = CGFloat(max(0.25, min(1, v))) }
         case "close":
+            if let j = b["json"] as? String { writeState(j) }
             NSApp.terminate(nil)
         default: break
         }
@@ -956,9 +1285,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler {
         let edit = NSMenu(title: "Edit"); editItem.submenu = edit
         edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
         edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        let copyItem = NSMenuItem(title: "Copy", action: #selector(copySelection(_:)), keyEquivalent: "c")
+        copyItem.target = self
+        edit.addItem(copyItem)
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let selectItem = NSMenuItem(title: "Select All", action: #selector(selectAllItems(_:)), keyEquivalent: "a")
+        selectItem.target = self
+        edit.addItem(selectItem)
+        let copyAll = NSMenuItem(title: "Copy All", action: #selector(copyAllItems(_:)), keyEquivalent: "C")
+        copyAll.target = self
+        edit.addItem(copyAll)
         let viewItem = NSMenuItem(); main.addItem(viewItem)
         let view = NSMenu(title: "View"); viewItem.submenu = view
         let pin = NSMenuItem(title: "Pin on Top", action: #selector(togglePin(_:)), keyEquivalent: "f")
