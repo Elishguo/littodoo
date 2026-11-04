@@ -69,8 +69,11 @@ Unzip `Littodoo-Windows.zip` to a permanent folder and double-click `Install-Win
 | Pin on top | `Cmd+F` | `Alt+F` |
 | More / less opaque | `Cmd++` / `Cmd+-` (or `Cmd` + scroll) | `Alt++` / `Alt+-` (8% steps, 25–100%) |
 | Add item / project | `Cmd+N` | `Alt+N` |
-| New line in the same item | `Enter` | `Enter` |
-| Split into a new to-do at the caret | the `+` button | the `+` button |
+| New line inside the current to-do | `Enter` | `Enter` |
+| New to-do | `+`. At the end of a to-do, or with nothing focused, it adds an empty one below. If the caret is not at the end, it splits there | `+` |
+| Delete an empty to-do | `Backspace` (focus returns to the previous to-do) | `Backspace` at the start of an empty item |
+| Select across to-dos | drag through the text, Shift-click, or `Cmd+A`. `Cmd+C` copies; Backspace deletes the selection. Extra lines of one to-do are indented | select inside one item |
+| Reorder a to-do | drag the handle on the left, or `Cmd+Option+Up` / `Cmd+Option+Down` | |
 | Indent a mind-map note (next level) | `Tab` | `Tab` |
 | Outdent | `Shift+Tab` | `Shift+Tab` |
 
