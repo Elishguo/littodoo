@@ -161,7 +161,7 @@ const post=m=>{try{window.webkit.messageHandlers.app.postMessage(m);}catch(e){tr
 const isMac=window.__PLATFORM__==="mac";
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
 let pending=null,openReveal=null,mapFocus=null,mapCascade=0;
-let structuring=false,allSel=false,saveQueued=false,lastJSON="";
+let structuring=false,allSel=false,saveTimer=null,lastJSON="";
 const skipCommit=new WeakSet();
 function fieldText(el){
  return ((el&&el.textContent)||"").replace(/\u00a0/g," ").replace(/\u200b/g,"");
@@ -173,9 +173,7 @@ function storedItemText(text){
 }
 function serializeMac(){
  const copy=JSON.parse(JSON.stringify(S));
- copy.items=(copy.items||[]).map(it=>Object.assign({},it,{text:storedItemText(it.text)})).filter(it=>{
-  const t=it.text||"";return t.includes("\n")||!!t.trim();
- });
+ copy.items=(copy.items||[]).map(it=>Object.assign({},it,{text:storedItemText(it.text!=null?it.text:"")}));
  return JSON.stringify(copy);
 }
 function save(){
@@ -184,12 +182,12 @@ function save(){
  post({type:"save",json});
 }
 function scheduleSave(){
- if(!isMac||saveQueued)return;
- saveQueued=true;
- queueMicrotask(()=>{saveQueued=false;if(isMac)save();});
+ if(!isMac)return;
+ if(saveTimer)clearTimeout(saveTimer);
+ saveTimer=setTimeout(()=>{saveTimer=null;save();},300);
 }
 function flush(){
- saveQueued=false;
+ if(saveTimer){clearTimeout(saveTimer);saveTimer=null;}
  save();
  return lastJSON;
 }
@@ -835,9 +833,9 @@ function row(it,isNew){
  const commit=(again)=>{
   if(skipCommit.has(tx)||structuring)return;
   if(isMac&&!isNew){
-   const v=liveText(tx);
-   if(macTodoEmpty(tx)){if(finished)return;finished=true;macRemoveItem(li,it);return;}
-   it.text=v;save();return;
+   it.text=liveText(tx);
+   save();
+   return;
   }
   if(finished)return;finished=true;
   const v=fieldText(tx).replace(/\s+$/,"");
@@ -1526,20 +1524,73 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler {
     var startFrame = NSRect.zero
     var isTerminating = false
     var didReplyToTerminate = false
+    var suppressEmptySave = false
     let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("ToDoTie")
     var stateURL: URL { dir.appendingPathComponent("state.json") }
+    var backupURL: URL { dir.appendingPathComponent("state.json.bak") }
+
+    func stateObject(from data: Data) -> [String: Any]? {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              obj["items"] is [Any] else { return nil }
+        return obj
+    }
+
+    func readState(at url: URL) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return stateObject(from: data)
+    }
+
+    func jsLiteral(for obj: [String: Any]) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: obj),
+              var text = String(data: data, encoding: .utf8) else {
+            return "{\"color\":\"white\",\"pin\":false,\"opacity\":1,\"items\":[]}"
+        }
+        text = text.replacingOccurrences(of: "\u{2028}", with: "\\u2028")
+        text = text.replacingOccurrences(of: "\u{2029}", with: "\\u2029")
+        return text
+    }
+
+    func number(_ obj: [String: Any], _ key: String, _ fallback: Double) -> Double {
+        (obj[key] as? NSNumber)?.doubleValue ?? fallback
+    }
+
+    func syncFile(_ url: URL) {
+        if let handle = try? FileHandle(forWritingTo: url) {
+            try? handle.synchronize()
+            try? handle.close()
+        }
+    }
+
+    func loadPersistedState() -> (json: String, pin: Bool, opacity: Double) {
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        if let obj = readState(at: stateURL) {
+            return (jsLiteral(for: obj), (obj["pin"] as? Bool) ?? false, number(obj, "opacity", 1))
+        }
+        if let obj = readState(at: backupURL) {
+            if let data = try? JSONSerialization.data(withJSONObject: obj) {
+                try? data.write(to: stateURL, options: .atomic)
+                syncFile(stateURL)
+            }
+            return (jsLiteral(for: obj), (obj["pin"] as? Bool) ?? false, number(obj, "opacity", 1))
+        }
+        let mainExists = FileManager.default.fileExists(atPath: stateURL.path)
+        let backupExists = FileManager.default.fileExists(atPath: backupURL.path)
+        if mainExists || backupExists { suppressEmptySave = true }
+        return ("{\"color\":\"white\",\"pin\":false,\"opacity\":1,\"items\":[]}", false, 1)
+    }
 
     func writeState(_ json: String) {
-        guard let data = json.data(using: .utf8), !data.isEmpty else { return }
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              obj["items"] is [Any] else { return }
+        guard let data = json.data(using: .utf8), !data.isEmpty,
+              let obj = stateObject(from: data),
+              let items = obj["items"] as? [Any] else { return }
+        if suppressEmptySave && items.isEmpty { return }
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try data.write(to: backupURL, options: .atomic)
+            syncFile(backupURL)
             try data.write(to: stateURL, options: .atomic)
-            if let handle = try? FileHandle(forWritingTo: stateURL) {
-                try? handle.synchronize()
-                try? handle.close()
-            }
+            syncFile(stateURL)
+            if !items.isEmpty { suppressEmptySave = false }
         } catch {
             NSLog("Littodoo save failed: \(error.localizedDescription)")
         }
@@ -1560,17 +1611,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler {
     }
 
     func applicationDidFinishLaunching(_ n: Notification) {
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        var saved = (try? String(contentsOf: stateURL, encoding: .utf8)) ?? "null"
-        if saved == "null" {
-            saved = "{\"color\":\"white\",\"pin\":false,\"opacity\":1,\"items\":[]}"
-        }
-        var pin = false
-        var opacity: Double = 1
-        if let d = saved.data(using: .utf8), let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
-            pin = (o["pin"] as? Bool) ?? false
-            opacity = (o["opacity"] as? Double) ?? 1
-        }
+        let loaded = loadPersistedState()
+        let saved = loaded.json
+        let pin = loaded.pin
+        let opacity = loaded.opacity
 
         let cfg = WKWebViewConfiguration()
         let uc = WKUserContentController()
@@ -1601,6 +1645,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler {
         window.setFrameAutosaveName("ToDoTieWindow")
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.flushFromWeb(nil)
+        }
         setupMenu()
         NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] ev in
             guard let self = self, ev.modifierFlags.contains(.command) else { return ev }

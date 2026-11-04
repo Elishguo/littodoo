@@ -152,7 +152,7 @@ const post=m=>{try{window.webkit.messageHandlers.app.postMessage(m);}catch(e){tr
 const isMac=window.__PLATFORM__==="mac";
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
 let pending=null,openReveal=null,mapFocus=null,mapCascade=0;
-let structuring=false,allSel=false,saveQueued=false,lastJSON="";
+let structuring=false,allSel=false,saveTimer=null,lastJSON="";
 const skipCommit=new WeakSet();
 function fieldText(el){
  return ((el&&el.textContent)||"").replace(/\u00a0/g," ").replace(/\u200b/g,"");
@@ -164,9 +164,7 @@ function storedItemText(text){
 }
 function serializeMac(){
  const copy=JSON.parse(JSON.stringify(S));
- copy.items=(copy.items||[]).map(it=>Object.assign({},it,{text:storedItemText(it.text)})).filter(it=>{
-  const t=it.text||"";return t.includes("\n")||!!t.trim();
- });
+ copy.items=(copy.items||[]).map(it=>Object.assign({},it,{text:storedItemText(it.text!=null?it.text:"")}));
  return JSON.stringify(copy);
 }
 function save(){
@@ -175,12 +173,12 @@ function save(){
  post({type:"save",json});
 }
 function scheduleSave(){
- if(!isMac||saveQueued)return;
- saveQueued=true;
- queueMicrotask(()=>{saveQueued=false;if(isMac)save();});
+ if(!isMac)return;
+ if(saveTimer)clearTimeout(saveTimer);
+ saveTimer=setTimeout(()=>{saveTimer=null;save();},300);
 }
 function flush(){
- saveQueued=false;
+ if(saveTimer){clearTimeout(saveTimer);saveTimer=null;}
  save();
  return lastJSON;
 }
@@ -826,9 +824,9 @@ function row(it,isNew){
  const commit=(again)=>{
   if(skipCommit.has(tx)||structuring)return;
   if(isMac&&!isNew){
-   const v=liveText(tx);
-   if(macTodoEmpty(tx)){if(finished)return;finished=true;macRemoveItem(li,it);return;}
-   it.text=v;save();return;
+   it.text=liveText(tx);
+   save();
+   return;
   }
   if(finished)return;finished=true;
   const v=fieldText(tx).replace(/\s+$/,"");
