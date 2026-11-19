@@ -21,6 +21,7 @@ html,body{margin:0;height:100%;background:transparent;overflow:hidden;
  display:flex;align-items:center;justify-content:center;cursor:pointer;opacity:.55;padding:0}
 .btn:hover{opacity:1;background:rgba(0,0,0,.08)}
 .btn.on{opacity:1}
+#bPin.on .pin-head{fill:currentColor}
 .btn svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .dot{width:12px;height:12px;border-radius:50%;background:var(--bg);border:1.5px solid var(--ink)}
 .sw{display:none;gap:8px;padding:2px 14px 8px;flex:none;flex-wrap:wrap}
@@ -64,7 +65,7 @@ html.spanning,html.spanning .tx{-webkit-user-select:none!important;user-select:n
 .x{flex:none;border:none;background:none;color:var(--sub);font-size:14px;cursor:pointer;opacity:0;padding:0 2px;line-height:1.4}
 .it:hover .x,.mk:hover .x,.mp:hover .mp-x{opacity:1}
 .x:hover,.mp-x:hover{color:var(--ink)}
-.empty{font-size:12px;color:var(--sub);padding:10px 14px}
+.empty{font-size:12px;color:var(--sub);padding:10px 14px;cursor:text}
 .grip{position:absolute;right:0;bottom:0;width:22px;height:22px;cursor:nwse-resize;z-index:3}
 .grip:after{content:"";position:absolute;right:5px;bottom:5px;width:9px;height:9px;
  border-right:1.6px solid var(--sub);border-bottom:1.6px solid var(--sub);border-radius:0 0 3px 0}
@@ -257,7 +258,7 @@ function render(focusId){
  if(pending&&!inserted)ul.appendChild(row(pending,true));
  if(pending){requestAnimationFrame(()=>{const li=[...ul.querySelectorAll(".it")].find(e=>e.dataset.id===pending.id);
   const t=li&&li.querySelector(".tx");t&&t.focus();if(li)li.scrollIntoView({block:"nearest"});});}
- else if(!S.items.length){const d=document.createElement("div");d.className="empty";d.textContent="Tap + to add";ul.appendChild(d);}
+ else if(!S.items.length){const d=document.createElement("div");d.className="empty";d.textContent="Click a blank area to start";ul.appendChild(d);}
  ul.scrollTop=keepScroll;
  const moved=[];
  ul.querySelectorAll(".it").forEach(e=>{
@@ -354,7 +355,7 @@ function focusCaret(tx,where){
 function showEmptyHint(){
  const ul=document.getElementById("list");
  if(!ul||ul.querySelector(".it")||ul.querySelector(".empty"))return;
- const d=document.createElement("div");d.className="empty";d.textContent="Tap + to add";ul.appendChild(d);
+ const d=document.createElement("div");d.className="empty";d.textContent="Click a blank area to start";ul.appendChild(d);
 }
 function placeInModel(ni,visualIndex){
  const vis=ordered().filter(x=>x.id!==ni.id);
@@ -960,9 +961,33 @@ function row(it,isNew){
  x.onclick=()=>{S.items=S.items.filter(i=>i.id!==it.id);if(isNew)pending=null;save();render();};
  inner.append(ck,tx,x);li.append(reveal,inner);return li;
 }
+function addFromBlank(){
+ if(S.mode!=="list")return;
+ const ul=document.getElementById("list");
+ const emptyRow=[...ul.querySelectorAll(".it")].find(li=>{
+  const tx=li.querySelector(".tx");
+  return tx&&!liveText(tx).trim();
+ });
+ if(emptyRow){focusCaret(emptyRow.querySelector(".tx"),"end");return;}
+ if(isMac)macAdd();
+ else addAtCaret();
+}
+let blankTap=null;
 document.getElementById("list").addEventListener("pointerdown",e=>{
  if(!e.target.closest(".it"))closeReveals(null);
+ if(S.mode!=="list"||(e.button!=null&&e.button!==0)){blankTap=null;return;}
+ if(e.target.closest(".it")||e.target.closest(".btn")){blankTap=null;return;}
+ blankTap={x:e.clientX,y:e.clientY,id:e.pointerId};
 });
+document.getElementById("list").addEventListener("pointerup",e=>{
+ if(!blankTap||blankTap.id!==e.pointerId)return;
+ const moved=Math.hypot(e.clientX-blankTap.x,e.clientY-blankTap.y)>6;
+ blankTap=null;
+ if(moved||S.mode!=="list")return;
+ if(e.target.closest&&e.target.closest(".it"))return;
+ addFromBlank();
+});
+document.getElementById("list").addEventListener("pointercancel",()=>{blankTap=null;});
 
 /* ========== MAP MODE ========== */
 const PCOLORS=[
@@ -1377,9 +1402,16 @@ document.getElementById("bClose").onclick=()=>{
  else post({type:"close"});
 };
 const bPin=document.getElementById("bPin");
-function setPin(on){S.pin=!!on;bPin.classList.toggle("on",S.pin);post({type:"pin",on:S.pin});save();}
+const PIN_OPEN='<svg viewBox="0 0 16 16"><path d="M9.5 1.8l4.7 4.7-2 .6-2.3 2.8.2 2.6-1 1-3-3-4 4M7 5.2l3-3"/></svg>';
+const PIN_CLOSED='<svg viewBox="0 0 16 16"><path class="pin-head" d="M9.5 1.8l4.7 4.7-2 .6-2.3 2.8L7 5.2 10 2.2Z"/><path d="M9.5 1.8l4.7 4.7-2 .6-2.3 2.8.2 2.6-1 1-3-3-4 4M7 5.2l3-3"/></svg>';
+function paintPin(){
+ bPin.classList.toggle("on",!!S.pin);
+ bPin.setAttribute("aria-pressed",String(!!S.pin));
+ bPin.innerHTML=S.pin?PIN_CLOSED:PIN_OPEN;
+}
+function setPin(on){S.pin=!!on;paintPin();post({type:"pin",on:S.pin});save();}
 bPin.onclick=()=>setPin(!S.pin);
-bPin.classList.toggle("on",!!S.pin);
+paintPin();
 document.getElementById("head").addEventListener("mousedown",e=>{
  if(e.target.closest(".btn"))return;post({type:"drag"});});
 const g=document.getElementById("grip");let rsx=0,rsy=0;
